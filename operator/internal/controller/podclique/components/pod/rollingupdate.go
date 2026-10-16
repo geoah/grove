@@ -44,7 +44,9 @@ type updateWork struct {
 	oldTemplateHashReadyPods []*corev1.Pod
 	// oldTemplateHashPendingPods are old-hash Pods still in the Pending phase.
 	oldTemplateHashPendingPods []*corev1.Pod
-	// oldTemplateHashUnhealthyPods are old-hash Pods that started but are not Ready or exited erroneously.
+	// oldTemplateHashUnhealthyPods are old-hash Pods that are not Ready and either have a started but
+	// not Ready container or a container that exited erroneously. A Ready Pod is never in this bucket,
+	// even if one of its containers restarted after a non-zero exit earlier in its life.
 	oldTemplateHashUnhealthyPods []*corev1.Pod
 	// oldTemplateHashStartingPods are old-hash Pods whose containers have not yet passed the startup probe.
 	oldTemplateHashStartingPods []*corev1.Pod
@@ -175,14 +177,17 @@ func (r _resource) computeUpdateWork(logger logr.Logger, ss *syncSnapshot) *upda
 		// This old-hash Pod is still awaiting replacement.
 		work.oldHashPodsAwaitingReplacement++
 		// Pending, unhealthy, starting, and uncategorized Pods are deleted immediately; Ready Pods are
-		// queued for ordered budgeted replacement.
+		// queued for ordered budgeted replacement. Readiness is checked before the erroneous-exit check
+		// because a container's LastTerminationState keeps a non-zero exit code after it restarts and
+		// becomes Ready again. Treating such a Pod as unhealthy would delete every once-crashed Pod at
+		// the same time, outside the disruption budget, even though they are serving.
 		switch {
 		case k8sutils.IsPodPending(pod):
 			work.oldTemplateHashPendingPods = append(work.oldTemplateHashPendingPods, pod)
-		case k8sutils.HasAnyStartedButNotReadyContainer(pod) || k8sutils.HasAnyContainerExitedErroneously(logger, pod):
-			work.oldTemplateHashUnhealthyPods = append(work.oldTemplateHashUnhealthyPods, pod)
 		case k8sutils.IsPodReady(pod):
 			work.oldTemplateHashReadyPods = append(work.oldTemplateHashReadyPods, pod)
+		case k8sutils.HasAnyStartedButNotReadyContainer(pod) || k8sutils.HasAnyContainerExitedErroneously(logger, pod):
+			work.oldTemplateHashUnhealthyPods = append(work.oldTemplateHashUnhealthyPods, pod)
 		case k8sutils.HasAnyContainerNotStarted(pod):
 			work.oldTemplateHashStartingPods = append(work.oldTemplateHashStartingPods, pod)
 		default:

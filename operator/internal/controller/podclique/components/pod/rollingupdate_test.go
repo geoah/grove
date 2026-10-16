@@ -54,6 +54,7 @@ func TestComputeUpdateWork(t *testing.T) {
 		{"old unhealthy (started, not ready)", newTestPod("old-unhealthy-started", testOldHash, withPhase(corev1.PodRunning), withContainerStatus(ptr.To(true), false)), bucketOldUnhealthy},
 		{"old unhealthy (erroneous exit)", newTestPod("old-unhealthy-exit", testOldHash, withPhase(corev1.PodRunning), withErroneousExit()), bucketOldUnhealthy},
 		{"old ready", newTestPod("old-ready", testOldHash, withPhase(corev1.PodRunning), withReadyCondition(), withContainerStatus(ptr.To(true), true)), bucketOldReady},
+		{"old ready after an earlier erroneous exit", newTestPod("old-ready-restarted", testOldHash, withPhase(corev1.PodRunning), withReadyCondition(), withErroneousExit()), bucketOldReady},
 		{"old starting (Started=false)", newTestPod("old-starting-false", testOldHash, withPhase(corev1.PodRunning), withContainerStatus(ptr.To(false), false)), bucketOldStarting},
 		{"old starting (Started=nil)", newTestPod("old-starting-nil", testOldHash, withPhase(corev1.PodRunning), withContainerStatus(nil, false)), bucketOldStarting},
 		{"old uncategorized (no containers)", newTestPod("old-uncategorized", testOldHash, withPhase(corev1.PodRunning)), bucketOldUncategorized},
@@ -225,6 +226,21 @@ func TestProcessPendingUpdates(t *testing.T) {
 		testutils.AssertGroveError(t, requeueErr, err)
 		// Budget of 2 and MinAvailable headroom of 2, so the two oldest are deleted and the newest remains.
 		assert.ElementsMatch(t, []string{"old-2"}, remainingPodNames(t, cl))
+	})
+
+	t.Run("paces ready pods that restarted after an erroneous exit", func(t *testing.T) {
+		pclq := pclqUpdating(3, 1)
+		pods := []*corev1.Pod{
+			newTestPod("old-0", testOldHash, withPhase(corev1.PodRunning), withReadyCondition(), withErroneousExit(), withAgeMinutes(3)),
+			newTestPod("old-1", testOldHash, withPhase(corev1.PodRunning), withReadyCondition(), withErroneousExit(), withAgeMinutes(2)),
+			newTestPod("old-2", testOldHash, withPhase(corev1.PodRunning), withReadyCondition(), withErroneousExit(), withAgeMinutes(1)),
+		}
+		r, cl := newResource(pclq, pods)
+		ss := &syncSnapshot{pcs: pcsWithMaxUnavailable(1), pclq: pclq, cliqueName: testCliqueName, expectedPodTemplateHash: testNewHash, existingPCLQPods: pods}
+
+		err := r.processPendingUpdates(context.Background(), logr.Discard(), ss)
+		testutils.AssertGroveError(t, requeueErr, err)
+		assert.ElementsMatch(t, []string{"old-1", "old-2"}, remainingPodNames(t, cl), "Ready pods with a past non-zero exit must be replaced within MaxUnavailable, not all at once")
 	})
 
 	t.Run("rolls one pod at a time when MinAvailable equals replicas", func(t *testing.T) {
